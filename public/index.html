@@ -320,8 +320,9 @@
           if (data.type === 'new_message') {
             if (currentChat) loadMessagesForChat(currentChat);
           }
-          if (data.type === 'chat_request') {
+          if (data.type === 'chat_request' || data.type === 'chat_accepted') {
             loadChatRequests();
+            loadUserData();
           }
           if (data.type === 'typing' && data.chat === currentChat && data.user !== currentUser) {
             setTypingUsers(prev => ({ ...prev, [data.user]: true }));
@@ -371,10 +372,18 @@
       }, [messages, currentChat]);
 
       useEffect(() => {
-        if (isLoggedIn) {
+        if (isLoggedIn && currentUser) {
+          loadUserData();
           loadChatRequests();
+          
+          // Regelmäßig nach neuen Anfragen suchen
+          const interval = setInterval(() => {
+            loadChatRequests();
+          }, 3000);
+          
+          return () => clearInterval(interval);
         }
-      }, [isLoggedIn]);
+      }, [isLoggedIn, currentUser]);
 
       const loadUserData = async () => {
         if (!currentUser) return;
@@ -461,6 +470,21 @@
             setPrivateKey(privKey);
             setCurrentUser(username);
             setIsLoggedIn(true);
+            
+            // Benutzer in der globalen Benutzerliste registrieren
+            let allUsers = [];
+            try {
+              const usersResult = await window.storage.get('all_users', true);
+              allUsers = JSON.parse(usersResult.value);
+            } catch (e) {
+              allUsers = [];
+            }
+            
+            if (!allUsers.includes(username)) {
+              allUsers.push(username);
+              await window.storage.set('all_users', JSON.stringify(allUsers), true);
+            }
+            
             await loadUserData();
             await loadChatRequests();
           } catch (e) {
@@ -480,20 +504,26 @@
         }
 
         try {
-          // Hole alle registrierten Benutzer
-          const response = await fetch(`/api/users/search?q=${encodeURIComponent(query.trim())}`);
-          
-          if (!response.ok) {
-            console.error('Suchfehler:', response.status);
-            setSearchResults([]);
-            return;
+          // Hole alle registrierten Benutzer aus der globalen Liste
+          let allUsers = [];
+          try {
+            const usersResult = await window.storage.get('all_users', true);
+            allUsers = JSON.parse(usersResult.value);
+          } catch (e) {
+            allUsers = [];
           }
           
-          const allUsers = await response.json();
-          console.log('Gefundene Benutzer:', allUsers);
+          console.log('Alle Benutzer:', allUsers);
+          
+          // Suche nach Übereinstimmung
+          const matchedUsers = allUsers.filter(u => 
+            u.toLowerCase().includes(query.toLowerCase())
+          );
+          
+          console.log('Übereinstimmende Benutzer:', matchedUsers);
           
           // Filtere den aktuellen Benutzer und bereits verbundene aus
-          const filteredUsers = allUsers.filter(u => {
+          const filteredUsers = matchedUsers.filter(u => {
             const isNotSelf = u !== currentUser;
             const notInChats = !chats.includes(u);
             const notInRequests = !chatRequests.includes(u);
@@ -547,10 +577,12 @@
 
       const acceptChatRequest = async (requester) => {
         try {
+          // Füge Requester zu meinen Chats hinzu
           const newChats = [...chats, requester];
           setChats(newChats);
           await window.storage.set('chats_' + currentUser, JSON.stringify(newChats), true);
 
+          // Füge mich zu deren Chats hinzu
           let theirChats = [];
           try {
             const result = await window.storage.get('chats_' + requester, true);
@@ -564,14 +596,34 @@
             await window.storage.set('chats_' + requester, JSON.stringify(theirChats), true);
           }
 
+          // Entferne aus Anfragen
           const newRequests = chatRequests.filter(r => r !== requester);
           setChatRequests(newRequests);
           await window.storage.set('requests_' + currentUser, JSON.stringify(newRequests), true);
 
+          // Entferne aus deren Pending-Liste
+          try {
+            const theirPendingResult = await window.storage.get('pending_' + requester, true);
+            let theirPending = JSON.parse(theirPendingResult.value);
+            theirPending = theirPending.filter(p => p !== currentUser);
+            await window.storage.set('pending_' + requester, JSON.stringify(theirPending), true);
+          } catch (e) {
+            // Kein Problem wenn nicht vorhanden
+          }
+
           setCurrentChat(requester);
           await loadMessagesForChat(requester);
+          
+          // Sende Benachrichtigung über WebSocket
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ 
+              type: 'chat_accepted', 
+              from: currentUser,
+              to: requester 
+            }));
+          }
         } catch (e) {
-          setError('Fehler beim Akzeptieren');
+          setError('Fehler beim Akzeptieren: ' + e.message);
         }
       };
 
