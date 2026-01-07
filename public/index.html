@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sicherer Chat</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    
+    // Storage API Mock für Render Backend
+    window.storage = {
+      async get(key, shared = false) {
+        try {
+          const response = await fetch(`/api/storage/${key}?shared=${shared}`);
+          if (!response.ok) throw new Error('Key not found');
+          return await response.json();
+        } catch (e) {
+          throw e;
+        }
+      },
+      async set(key, value, shared = false) {
+        const response = await fetch(`/api/storage/${key}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value, shared })
+        });
+        return await response.json();
+      },
+      async delete(key, shared = false) {
+        const response = await fetch(`/api/storage/${key}?shared=${shared}`, {
+          method: 'DELETE'
+        });
+        return await response.json();
+      },
+      async list(prefix = '', shared = false) {
+        const response = await fetch(`/api/storage?prefix=${prefix}&shared=${shared}`);
+        return await response.json();
+      }
+    };
+
+    const LockIcon = () => (
+      <svg className="w-12 h-12 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+    );
+
+    const SendIcon = () => (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+      </svg>
+    );
+
+    const LogOutIcon = () => (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+      </svg>
+    );
+
+    const UsersIcon = () => (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+      </svg>
+    );
+
+    const MessageSquareIcon = () => (
+      <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+      </svg>
+    );
+
+    const EncryptedChat = () => {
+      const [isLoggedIn, setIsLoggedIn] = useState(false);
+      const [username, setUsername] = useState('');
+      const [password, setPassword] = useState('');
+      const [currentUser, setCurrentUser] = useState('');
+      const [roomName, setRoomName] = useState('');
+      const [currentRoom, setCurrentRoom] = useState('');
+      const [message, setMessage] = useState('');
+      const [messages, setMessages] = useState([]);
+      const [rooms, setRooms] = useState([]);
+      const [error, setError] = useState('');
+      const messagesEndRef = useRef(null);
+
+      const encrypt = async (text, key) => {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(text);
+        const keyData = encoder.encode(key);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', keyData);
+        const cryptoKey = await crypto.subtle.importKey('raw', hashBuffer, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, data);
+        const result = new Uint8Array(iv.length + encrypted.byteLength);
+        result.set(iv, 0);
+        result.set(new Uint8Array(encrypted), iv.length);
+        return btoa(String.fromCharCode(...result));
+      };
+
+      const decrypt = async (encryptedText, key) => {
+        try {
+          const encoder = new TextEncoder();
+          const keyData = encoder.encode(key);
+          const hashBuffer = await crypto.subtle.digest('SHA-256', keyData);
+          const cryptoKey = await crypto.subtle.importKey('raw', hashBuffer, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+          const encryptedData = Uint8Array.from(atob(encryptedText), c => c.charCodeAt(0));
+          const iv = encryptedData.slice(0, 12);
+          const data = encryptedData.slice(12);
+          const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, data);
+          return new TextDecoder().decode(decrypted);
+        } catch (e) {
+          return '[Entschlüsselung fehlgeschlagen]';
+        }
+      };
+
+      const loadData = async () => {
+        try {
+          const roomsResult = await window.storage.get('rooms', true);
+          if (roomsResult) {
+            setRooms(JSON.parse(roomsResult.value));
+          }
+        } catch (e) {
+          console.log('Keine gespeicherten Daten');
+        }
+      };
+
+      useEffect(() => {
+        loadData();
+      }, []);
+
+      useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, [messages]);
+
+      const loadMessages = async (room) => {
+        try {
+          const result = await window.storage.get(`messages_${room}`, true);
+          if (result) {
+            const encryptedMessages = JSON.parse(result.value);
+            const decryptedMessages = await Promise.all(
+              encryptedMessages.map(async (msg) => ({
+                ...msg,
+                text: await decrypt(msg.text, password)
+              }))
+            );
+            setMessages(decryptedMessages);
+          } else {
+            setMessages([]);
+          }
+        } catch (e) {
+          setMessages([]);
+        }
+      };
+
+      const handleAuth = async () => {
+        setError('');
+        if (!username || !password) {
+          setError('Bitte Benutzername und Passwort eingeben');
+          return;
+        }
+
+        try {
+          const usersResult = await window.storage.get('users', true);
+          let users = usersResult ? JSON.parse(usersResult.value) : {};
+
+          if (users[username]) {
+            if (users[username] === password) {
+              setCurrentUser(username);
+              setIsLoggedIn(true);
+              setError('');
+            } else {
+              setError('Falsches Passwort');
+            }
+          } else {
+            users[username] = password;
+            await window.storage.set('users', JSON.stringify(users), true);
+            setCurrentUser(username);
+            setIsLoggedIn(true);
+            setError('');
+          }
+        } catch (e) {
+          setError('Fehler bei der Authentifizierung');
+        }
+      };
+
+      const handleJoinRoom = async () => {
+        if (!roomName) return;
+
+        try {
+          const roomsResult = await window.storage.get('rooms', true);
+          let existingRooms = roomsResult ? JSON.parse(roomsResult.value) : [];
+          
+          if (!existingRooms.includes(roomName)) {
+            existingRooms.push(roomName);
+            await window.storage.set('rooms', JSON.stringify(existingRooms), true);
+            setRooms(existingRooms);
+          }
+
+          setCurrentRoom(roomName);
+          await loadMessages(roomName);
+          setRoomName('');
+        } catch (e) {
+          setError('Fehler beim Betreten des Raums');
+        }
+      };
+
+      const handleSendMessage = async () => {
+        if (!message.trim()) return;
+
+        try {
+          const encryptedText = await encrypt(message, password);
+          const newMessage = {
+            id: Date.now(),
+            user: currentUser,
+            text: encryptedText,
+            timestamp: new Date().toISOString()
+          };
+
+          const result = await window.storage.get(`messages_${currentRoom}`, true);
+          const existingMessages = result ? JSON.parse(result.value) : [];
+          existingMessages.push(newMessage);
+          
+          await window.storage.set(`messages_${currentRoom}`, JSON.stringify(existingMessages), true);
+          
+          await loadMessages(currentRoom);
+          setMessage('');
+        } catch (e) {
+          setError('Fehler beim Senden der Nachricht');
+        }
+      };
+
+      const handleLogout = () => {
+        setIsLoggedIn(false);
+        setCurrentUser('');
+        setCurrentRoom('');
+        setMessages([]);
+        setPassword('');
+      };
+
+      const handleLeaveRoom = () => {
+        setCurrentRoom('');
+        setMessages([]);
+      };
+
+      const handleKeyPress = (e, action) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          action();
+        }
+      };
+
+      if (!isLoggedIn) {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+              <div className="flex items-center justify-center mb-6">
+                <LockIcon />
+              </div>
+              <h1 className="text-3xl font-bold text-center mb-2 text-gray-800">Sicherer Chat</h1>
+              <p className="text-center text-gray-600 mb-8">Ende-zu-Ende verschlüsselt</p>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Benutzername</label>
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    onKeyPress={(e) => handleKeyPress(e, handleAuth)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    placeholder="Dein Benutzername"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Passwort</label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    onKeyPress={(e) => handleKeyPress(e, handleAuth)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    placeholder="Dein Passwort"
+                  />
+                </div>
+
+                {error && (
+                  <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+                    {error}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleAuth}
+                  className="w-full bg-purple-600 text-white py-3 rounded-lg font-semibold hover:bg-purple-700 transition"
+                >
+                  Anmelden / Registrieren
+                </button>
+              </div>
+
+              <p className="text-xs text-gray-500 text-center mt-6">
+                Alle Nachrichten werden mit deinem Passwort verschlüsselt
+              </p>
+            </div>
+          </div>
+        );
+      }
+
+      if (!currentRoom) {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900 p-4">
+            <div className="max-w-4xl mx-auto">
+              <div className="bg-white rounded-2xl shadow-2xl p-8">
+                <div className="flex justify-between items-center mb-8">
+                  <div>
+                    <h1 className="text-3xl font-bold text-gray-800">Chat-Räume</h1>
+                    <p className="text-gray-600">Angemeldet als: {currentUser}</p>
+                  </div>
+                  <button
+                    onClick={handleLogout}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
+                  >
+                    <LogOutIcon />
+                    Abmelden
+                  </button>
+                </div>
+
+                <div className="mb-8">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={roomName}
+                      onChange={(e) => setRoomName(e.target.value)}
+                      onKeyPress={(e) => handleKeyPress(e, handleJoinRoom)}
+                      placeholder="Raumname eingeben..."
+                      className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                    />
+                    <button
+                      onClick={handleJoinRoom}
+                      className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-semibold"
+                    >
+                      Raum betreten
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
+                    <UsersIcon />
+                    Verfügbare Räume
+                  </h2>
+                  {rooms.length === 0 ? (
+                    <p className="text-gray-500 text-center py-8">
+                      Noch keine Räume vorhanden. Erstelle den ersten Raum!
+                    </p>
+                  ) : (
+                    <div className="grid gap-3">
+                      {rooms.map((room) => (
+                        <button
+                          key={room}
+                          onClick={() => {
+                            setCurrentRoom(room);
+                            loadMessages(room);
+                          }}
+                          className="flex items-center gap-3 p-4 bg-gray-50 hover:bg-purple-50 rounded-lg transition border border-gray-200 hover:border-purple-300"
+                        >
+                          <MessageSquareIcon />
+                          <span className="font-medium text-gray-800">{room}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900 p-4">
+          <div className="max-w-4xl mx-auto h-screen flex flex-col">
+            <div className="bg-white rounded-t-2xl shadow-2xl p-4 flex justify-between items-center">
+              <div>
+                <h2 className="text-xl font-bold text-gray-800">#{currentRoom}</h2>
+                <p className="text-sm text-gray-600">{currentUser}</p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleLeaveRoom}
+                  className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"
+                >
+                  Raum verlassen
+                </button>
+                <button
+                  onClick={handleLogout}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
+                >
+                  <LogOutIcon />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 bg-white overflow-y-auto p-6 space-y-4" style={{ maxHeight: 'calc(100vh - 240px)' }}>
+              {messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex ${msg.user === currentUser ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    className={`max-w-xs lg:max-w-md px-4 py-3 rounded-2xl ${
+                      msg.user === currentUser
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-gray-200 text-gray-800'
+                    }`}
+                  >
+                    <p className="text-xs font-semibold mb-1 opacity-75">{msg.user}</p>
+                    <p className="break-words">{msg.text}</p>
+                    <p className="text-xs mt-1 opacity-75">
+                      {new Date(msg.timestamp).toLocaleTimeString('de-DE', {
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </p>
+                  </div>
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <div className="bg-white rounded-b-2xl shadow-2xl p-4">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  onKeyPress={(e) => handleKeyPress(e, handleSendMessage)}
+                  placeholder="Nachricht eingeben..."
+                  className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                />
+                <button
+                  onClick={handleSendMessage}
+                  className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition flex items-center gap-2"
+                >
+                  <SendIcon />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<EncryptedChat />, document.getElementById('root'));
+  </script>
+</body>
+</html>
