@@ -1,0 +1,16 @@
+{
+  "name": "encrypted-chat-app",
+  "version": "1.0.0",
+  "description": "Ende-zu-Ende verschlüsselte Chat-Anwendung",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
