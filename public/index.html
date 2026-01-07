@@ -213,11 +213,10 @@
       const loadData = async () => {
         try {
           const roomsResult = await window.storage.get('rooms', true);
-          if (roomsResult) {
-            setRooms(JSON.parse(roomsResult.value));
-          }
+          setRooms(JSON.parse(roomsResult.value));
         } catch (e) {
-          console.log('Keine gespeicherten Daten');
+          console.log('Keine gespeicherten Räume gefunden');
+          setRooms([]);
         }
       };
 
@@ -259,8 +258,15 @@
         }
 
         try {
-          const usersResult = await window.storage.get('users', true);
-          let users = usersResult ? JSON.parse(usersResult.value) : {};
+          let users = {};
+          
+          try {
+            const usersResult = await window.storage.get('users', true);
+            users = JSON.parse(usersResult.value);
+          } catch (e) {
+            console.log('Keine Benutzer vorhanden, erstelle neue Datenbank');
+            users = {};
+          }
 
           const hashedPassword = await hashPassword(password);
 
@@ -302,8 +308,15 @@
         const roomId = [currentUser, targetUser].sort().join('_dm_');
         
         try {
-          const roomsResult = await window.storage.get('rooms', true);
-          let existingRooms = roomsResult ? JSON.parse(roomsResult.value) : [];
+          let existingRooms = [];
+          
+          try {
+            const roomsResult = await window.storage.get('rooms', true);
+            existingRooms = JSON.parse(roomsResult.value);
+          } catch (e) {
+            console.log('Erstelle erste Raumliste');
+            existingRooms = [];
+          }
           
           if (!existingRooms.includes(roomId)) {
             existingRooms.push(roomId);
@@ -316,7 +329,7 @@
           setSearchQuery('');
           setSearchResults([]);
         } catch (e) {
-          setError('Fehler beim Erstellen des Direktchats');
+          setError('Fehler beim Erstellen des Direktchats: ' + e.message);
         }
       };
 
@@ -324,8 +337,15 @@
         if (!roomName) return;
 
         try {
-          const roomsResult = await window.storage.get('rooms', true);
-          let existingRooms = roomsResult ? JSON.parse(roomsResult.value) : [];
+          let existingRooms = [];
+          
+          try {
+            const roomsResult = await window.storage.get('rooms', true);
+            existingRooms = JSON.parse(roomsResult.value);
+          } catch (e) {
+            console.log('Erstelle erste Raumliste');
+            existingRooms = [];
+          }
           
           if (!existingRooms.includes(roomName)) {
             existingRooms.push(roomName);
@@ -337,7 +357,7 @@
           await loadMessages(roomName);
           setRoomName('');
         } catch (e) {
-          setError('Fehler beim Betreten des Raums');
+          setError('Fehler beim Betreten des Raums: ' + e.message);
         }
       };
 
@@ -353,8 +373,16 @@
             timestamp: new Date().toISOString()
           };
 
-          const result = await window.storage.get(`messages_${currentRoom}`, true);
-          const existingMessages = result ? JSON.parse(result.value) : [];
+          let existingMessages = [];
+          
+          try {
+            const result = await window.storage.get(`messages_${currentRoom}`, true);
+            existingMessages = JSON.parse(result.value);
+          } catch (e) {
+            console.log('Erstelle neue Nachrichtenliste für Raum');
+            existingMessages = [];
+          }
+          
           existingMessages.push(newMessage);
           
           await window.storage.set(`messages_${currentRoom}`, JSON.stringify(existingMessages), true);
@@ -367,7 +395,7 @@
           setMessage('');
           setShowEmojiPicker(false);
         } catch (e) {
-          setError('Fehler beim Senden der Nachricht');
+          setError('Fehler beim Senden der Nachricht: ' + e.message);
         }
       };
 
