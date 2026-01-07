@@ -15,7 +15,28 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
     
-    // Storage API Mock für Render Backend
+    // WebSocket Setup
+    let ws = null;
+    
+    const connectWebSocket = (onMessage) => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${window.location.host}`);
+      
+      ws.onopen = () => console.log('✅ WebSocket verbunden');
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        onMessage(data);
+      };
+      ws.onerror = (error) => console.error('❌ WebSocket Fehler:', error);
+      ws.onclose = () => {
+        console.log('🔄 WebSocket getrennt, Reconnect in 3s...');
+        setTimeout(() => connectWebSocket(onMessage), 3000);
+      };
+      
+      return ws;
+    };
+    
+    // Storage API
     window.storage = {
       async get(key, shared = false) {
         try {
@@ -46,6 +67,7 @@
       }
     };
 
+    // Icons
     const LockIcon = () => (
       <svg className="w-12 h-12 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
@@ -70,6 +92,18 @@
       </svg>
     );
 
+    const SearchIcon = () => (
+      <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+      </svg>
+    );
+
+    const SmileIcon = () => (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+    );
+
     const MessageSquareIcon = () => (
       <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
@@ -87,7 +121,24 @@
       const [messages, setMessages] = useState([]);
       const [rooms, setRooms] = useState([]);
       const [error, setError] = useState('');
+      const [onlineUsers, setOnlineUsers] = useState([]);
+      const [searchQuery, setSearchQuery] = useState('');
+      const [searchResults, setSearchResults] = useState([]);
+      const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+      const [typingUsers, setTypingUsers] = useState(new Set());
       const messagesEndRef = useRef(null);
+      const typingTimeoutRef = useRef(null);
+
+      const emojis = ['😀', '😂', '😍', '🥰', '😎', '🤔', '👍', '👏', '🎉', '❤️', '🔥', '✨', '💯', '🚀', '⭐', '💪'];
+
+      // Verbesserte Verschlüsselung mit Salt
+      const hashPassword = async (pass) => {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(pass + 'salt_secret_2025');
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      };
 
       const encrypt = async (text, key) => {
         const encoder = new TextEncoder();
@@ -119,6 +170,46 @@
         }
       };
 
+      useEffect(() => {
+        loadData();
+        
+        const wsConnection = connectWebSocket((data) => {
+          if (data.type === 'users_update') {
+            setOnlineUsers(data.users);
+          }
+          if (data.type === 'new_message' && data.room === currentRoom) {
+            loadMessages(currentRoom);
+          }
+          if (data.type === 'typing' && data.room === currentRoom && data.user !== currentUser) {
+            setTypingUsers(prev => new Set([...prev, data.user]));
+            setTimeout(() => {
+              setTypingUsers(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(data.user);
+                return newSet;
+              });
+            }, 3000);
+          }
+        });
+
+        return () => {
+          if (wsConnection) wsConnection.close();
+        };
+      }, []);
+
+      useEffect(() => {
+        if (isLoggedIn && ws) {
+          ws.send(JSON.stringify({ type: 'user_online', username: currentUser }));
+          return () => {
+            ws.send(JSON.stringify({ type: 'user_offline', username: currentUser }));
+          };
+        }
+      }, [isLoggedIn, currentUser]);
+
+      useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, [messages]);
+
       const loadData = async () => {
         try {
           const roomsResult = await window.storage.get('rooms', true);
@@ -129,14 +220,6 @@
           console.log('Keine gespeicherten Daten');
         }
       };
-
-      useEffect(() => {
-        loadData();
-      }, []);
-
-      useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, [messages]);
 
       const loadMessages = async (room) => {
         try {
@@ -165,12 +248,24 @@
           return;
         }
 
+        if (username.length < 3) {
+          setError('Benutzername muss mindestens 3 Zeichen lang sein');
+          return;
+        }
+
+        if (password.length < 6) {
+          setError('Passwort muss mindestens 6 Zeichen lang sein');
+          return;
+        }
+
         try {
           const usersResult = await window.storage.get('users', true);
           let users = usersResult ? JSON.parse(usersResult.value) : {};
 
+          const hashedPassword = await hashPassword(password);
+
           if (users[username]) {
-            if (users[username] === password) {
+            if (users[username] === hashedPassword) {
               setCurrentUser(username);
               setIsLoggedIn(true);
               setError('');
@@ -178,14 +273,50 @@
               setError('Falsches Passwort');
             }
           } else {
-            users[username] = password;
+            users[username] = hashedPassword;
             await window.storage.set('users', JSON.stringify(users), true);
             setCurrentUser(username);
             setIsLoggedIn(true);
             setError('');
           }
         } catch (e) {
-          setError('Fehler bei der Authentifizierung');
+          setError('Fehler bei der Authentifizierung: ' + e.message);
+        }
+      };
+
+      const searchUsers = async (query) => {
+        if (!query) {
+          setSearchResults([]);
+          return;
+        }
+        try {
+          const response = await fetch(`/api/users/search?q=${query}`);
+          const users = await response.json();
+          setSearchResults(users.filter(u => u !== currentUser));
+        } catch (e) {
+          console.error('Suchfehler:', e);
+        }
+      };
+
+      const startDirectMessage = async (targetUser) => {
+        const roomId = [currentUser, targetUser].sort().join('_dm_');
+        
+        try {
+          const roomsResult = await window.storage.get('rooms', true);
+          let existingRooms = roomsResult ? JSON.parse(roomsResult.value) : [];
+          
+          if (!existingRooms.includes(roomId)) {
+            existingRooms.push(roomId);
+            await window.storage.set('rooms', JSON.stringify(existingRooms), true);
+            setRooms(existingRooms);
+          }
+
+          setCurrentRoom(roomId);
+          await loadMessages(roomId);
+          setSearchQuery('');
+          setSearchResults([]);
+        } catch (e) {
+          setError('Fehler beim Erstellen des Direktchats');
         }
       };
 
@@ -228,14 +359,36 @@
           
           await window.storage.set(`messages_${currentRoom}`, JSON.stringify(existingMessages), true);
           
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'new_message', room: currentRoom }));
+          }
+          
           await loadMessages(currentRoom);
           setMessage('');
+          setShowEmojiPicker(false);
         } catch (e) {
           setError('Fehler beim Senden der Nachricht');
         }
       };
 
+      const handleTyping = () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'typing', room: currentRoom, user: currentUser }));
+        }
+        
+        if (typingTimeoutRef.current) {
+          clearTimeout(typingTimeoutRef.current);
+        }
+        
+        typingTimeoutRef.current = setTimeout(() => {
+          // Typing stopped
+        }, 2000);
+      };
+
       const handleLogout = () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'user_offline', username: currentUser }));
+        }
         setIsLoggedIn(false);
         setCurrentUser('');
         setCurrentRoom('');
@@ -255,6 +408,10 @@
         }
       };
 
+      const addEmoji = (emoji) => {
+        setMessage(message + emoji);
+      };
+
       if (!isLoggedIn) {
         return (
           <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900 flex items-center justify-center p-4">
@@ -267,7 +424,7 @@
               
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Benutzername</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Benutzername (mind. 3 Zeichen)</label>
                   <input
                     type="text"
                     value={username}
@@ -279,7 +436,7 @@
                 </div>
                 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Passwort</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Passwort (mind. 6 Zeichen)</label>
                   <input
                     type="password"
                     value={password}
@@ -305,7 +462,7 @@
               </div>
 
               <p className="text-xs text-gray-500 text-center mt-6">
-                Alle Nachrichten werden mit deinem Passwort verschlüsselt
+                Alle Nachrichten werden mit AES-256-GCM verschlüsselt
               </p>
             </div>
           </div>
@@ -320,7 +477,11 @@
                 <div className="flex justify-between items-center mb-8">
                   <div>
                     <h1 className="text-3xl font-bold text-gray-800">Chat-Räume</h1>
-                    <p className="text-gray-600">Angemeldet als: {currentUser}</p>
+                    <p className="text-gray-600">Angemeldet als: <span className="font-semibold">{currentUser}</span></p>
+                    <p className="text-sm text-green-600 flex items-center gap-1">
+                      <span className="inline-block w-2 h-2 bg-green-500 rounded-full"></span>
+                      {onlineUsers.length} Benutzer online
+                    </p>
                   </div>
                   <button
                     onClick={handleLogout}
@@ -332,6 +493,49 @@
                 </div>
 
                 <div className="mb-8">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    🔍 Benutzer suchen
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => {
+                        setSearchQuery(e.target.value);
+                        searchUsers(e.target.value);
+                      }}
+                      placeholder="Benutzername suchen..."
+                      className="w-full px-4 py-3 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                    />
+                    <div className="absolute right-3 top-3">
+                      <SearchIcon />
+                    </div>
+                  </div>
+                  {searchResults.length > 0 && (
+                    <div className="mt-2 bg-gray-50 border border-gray-200 rounded-lg p-2 max-h-48 overflow-y-auto">
+                      {searchResults.map(user => (
+                        <button
+                          key={user}
+                          onClick={() => startDirectMessage(user)}
+                          className="w-full text-left px-4 py-2 hover:bg-purple-100 rounded flex items-center justify-between"
+                        >
+                          <span className="font-medium">{user}</span>
+                          {onlineUsers.includes(user) && (
+                            <span className="text-xs text-green-600 flex items-center gap-1">
+                              <span className="inline-block w-2 h-2 bg-green-500 rounded-full"></span>
+                              Online
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mb-8">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    ➕ Neuen Raum erstellen
+                  </label>
                   <div className="flex gap-2">
                     <input
                       type="text"
@@ -345,7 +549,7 @@
                       onClick={handleJoinRoom}
                       className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-semibold"
                     >
-                      Raum betreten
+                      Erstellen
                     </button>
                   </div>
                 </div>
@@ -353,7 +557,7 @@
                 <div>
                   <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
                     <UsersIcon />
-                    Verfügbare Räume
+                    Verfügbare Räume ({rooms.length})
                   </h2>
                   {rooms.length === 0 ? (
                     <p className="text-gray-500 text-center py-8">
@@ -361,19 +565,26 @@
                     </p>
                   ) : (
                     <div className="grid gap-3">
-                      {rooms.map((room) => (
-                        <button
-                          key={room}
-                          onClick={() => {
-                            setCurrentRoom(room);
-                            loadMessages(room);
-                          }}
-                          className="flex items-center gap-3 p-4 bg-gray-50 hover:bg-purple-50 rounded-lg transition border border-gray-200 hover:border-purple-300"
-                        >
-                          <MessageSquareIcon />
-                          <span className="font-medium text-gray-800">{room}</span>
-                        </button>
-                      ))}
+                      {rooms.map((room) => {
+                        const isDirectMessage = room.includes('_dm_');
+                        const displayName = isDirectMessage 
+                          ? '💬 ' + room.replace('_dm_', ' ↔️ ')
+                          : '# ' + room;
+                        
+                        return (
+                          <button
+                            key={room}
+                            onClick={() => {
+                              setCurrentRoom(room);
+                              loadMessages(room);
+                            }}
+                            className="flex items-center gap-3 p-4 bg-gray-50 hover:bg-purple-50 rounded-lg transition border border-gray-200 hover:border-purple-300 text-left"
+                          >
+                            <MessageSquareIcon />
+                            <span className="font-medium text-gray-800">{displayName}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -383,18 +594,23 @@
         );
       }
 
+      const isDirectMessage = currentRoom.includes('_dm_');
+      const roomDisplayName = isDirectMessage 
+        ? currentRoom.replace('_dm_', ' ↔️ ')
+        : '#' + currentRoom;
+
       return (
         <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900 p-4">
           <div className="max-w-4xl mx-auto h-screen flex flex-col">
             <div className="bg-white rounded-t-2xl shadow-2xl p-4 flex justify-between items-center">
               <div>
-                <h2 className="text-xl font-bold text-gray-800">#{currentRoom}</h2>
+                <h2 className="text-xl font-bold text-gray-800">{roomDisplayName}</h2>
                 <p className="text-sm text-gray-600">{currentUser}</p>
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={handleLeaveRoom}
-                  className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"
+                  className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition text-sm"
                 >
                   Raum verlassen
                 </button>
@@ -408,6 +624,11 @@
             </div>
 
             <div className="flex-1 bg-white overflow-y-auto p-6 space-y-4" style={{ maxHeight: 'calc(100vh - 240px)' }}>
+              {messages.length === 0 && (
+                <div className="text-center text-gray-500 py-8">
+                  Noch keine Nachrichten. Schreibe die erste Nachricht! 👋
+                </div>
+              )}
               {messages.map((msg) => (
                 <div
                   key={msg.id}
@@ -421,7 +642,7 @@
                     }`}
                   >
                     <p className="text-xs font-semibold mb-1 opacity-75">{msg.user}</p>
-                    <p className="break-words">{msg.text}</p>
+                    <p className="break-words whitespace-pre-wrap">{msg.text}</p>
                     <p className="text-xs mt-1 opacity-75">
                       {new Date(msg.timestamp).toLocaleTimeString('de-DE', {
                         hour: '2-digit',
@@ -431,15 +652,42 @@
                   </div>
                 </div>
               ))}
+              {typingUsers.size > 0 && (
+                <div className="text-sm text-gray-500 italic">
+                  {Array.from(typingUsers).join(', ')} {typingUsers.size === 1 ? 'tippt' : 'tippen'}...
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </div>
 
             <div className="bg-white rounded-b-2xl shadow-2xl p-4">
+              {showEmojiPicker && (
+                <div className="mb-3 p-3 bg-gray-50 rounded-lg flex flex-wrap gap-2">
+                  {emojis.map((emoji, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => addEmoji(emoji)}
+                      className="text-2xl hover:scale-125 transition-transform"
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="flex gap-2">
+                <button
+                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                  className="px-3 py-3 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition"
+                >
+                  <SmileIcon />
+                </button>
                 <input
                   type="text"
                   value={message}
-                  onChange={(e) => setMessage(e.target.value)}
+                  onChange={(e) => {
+                    setMessage(e.target.value);
+                    handleTyping();
+                  }}
                   onKeyPress={(e) => handleKeyPress(e, handleSendMessage)}
                   placeholder="Nachricht eingeben..."
                   className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
