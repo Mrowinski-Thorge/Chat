@@ -1,4 +1,4 @@
-       <!DOCTYPE html>
+ <!DOCTYPE html>
 <html lang="de">
 <head>
   <meta charset="UTF-8">
@@ -271,6 +271,19 @@
       </svg>
     );
 
+    const SettingsIcon = () => (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg>
+    );
+
+    const TrashIcon = () => (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+      </svg>
+    );
+
     const EncryptedChat = () => {
       const [isLoggedIn, setIsLoggedIn] = useState(false);
       const [username, setUsername] = useState('');
@@ -290,7 +303,9 @@
       const [pendingRequests, setPendingRequests] = useState([]);
       const [selectedMessage, setSelectedMessage] = useState(null);
       const [typingUsers, setTypingUsers] = useState({});
+      const [showSettings, setShowSettings] = useState(false);
       const messagesEndRef = useRef(null);
+      const wsRef = useRef(null);
 
       const emojis = ['😀', '😂', '😍', '🥰', '😎', '🤔', '👍', '👏', '🎉', '❤️', '🔥', '✨', '💯', '🚀', '⭐', '💪'];
       const reactionEmojis = ['❤️', '😂', '👍', '🔥', '🎉', '😮'];
@@ -298,7 +313,7 @@
       useEffect(() => {
         loadUserData();
         
-        const wsConnection = connectWebSocket((data) => {
+        wsRef.current = connectWebSocket((data) => {
           if (data.type === 'users_update') {
             setOnlineUsers(data.users);
           }
@@ -308,7 +323,7 @@
           if (data.type === 'chat_request') {
             loadChatRequests();
           }
-          if (data.type === 'typing' && data.room === currentChat) {
+          if (data.type === 'typing' && data.chat === currentChat && data.user !== currentUser) {
             setTypingUsers(prev => ({ ...prev, [data.user]: true }));
             setTimeout(() => {
               setTypingUsers(prev => {
@@ -320,19 +335,36 @@
           }
         });
 
+        ws = wsRef.current;
+
         return () => {
-          if (wsConnection) wsConnection.close();
+          if (wsRef.current) {
+            if (currentUser) {
+              wsRef.current.send(JSON.stringify({ type: 'user_offline', username: currentUser }));
+            }
+            wsRef.current.close();
+          }
         };
       }, []);
 
       useEffect(() => {
-        if (isLoggedIn && ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'user_online', username: currentUser }));
-          return () => {
-            ws.send(JSON.stringify({ type: 'user_offline', username: currentUser }));
-          };
+        if (isLoggedIn && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'user_online', username: currentUser }));
         }
       }, [isLoggedIn, currentUser]);
+
+      useEffect(() => {
+        if (currentChat) {
+          loadMessagesForChat(currentChat);
+          
+          // Nachrichten alle 2 Sekunden neu laden für Live-Updates
+          const interval = setInterval(() => {
+            loadMessagesForChat(currentChat);
+          }, 2000);
+          
+          return () => clearInterval(interval);
+        }
+      }, [currentChat]);
 
       useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -438,14 +470,20 @@
       };
 
       const searchUsers = async (query) => {
-        if (!query || query.length < 2) {
+        if (!query || query.length < 1) {
           setSearchResults([]);
           return;
         }
         try {
           const response = await fetch(`/api/users/search?q=${query}`);
           const users = await response.json();
-          setSearchResults(users.filter(u => u !== currentUser));
+          const filteredUsers = users.filter(u => 
+            u !== currentUser && 
+            !chats.includes(u) && 
+            !chatRequests.includes(u) &&
+            !pendingRequests.includes(u)
+          );
+          setSearchResults(filteredUsers);
         } catch (e) {
           setSearchResults([]);
         }
@@ -557,8 +595,8 @@
           existingMessages.push(newMessage);
           await window.storage.set(`messages_${chatId}`, JSON.stringify(existingMessages), true);
           
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'new_message', chat: chatId }));
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'new_message', chat: chatId }));
           }
           
           await loadMessagesForChat(currentChat);
@@ -607,8 +645,8 @@
       };
 
       const handleLogout = () => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'user_offline', username: currentUser }));
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'user_offline', username: currentUser }));
         }
         setIsLoggedIn(false);
         setCurrentUser('');
@@ -617,6 +655,7 @@
         setChats([]);
         setPassword('');
         setPrivateKey(null);
+        setShowSettings(false);
       };
 
       const handleKeyPress = (e) => {
@@ -631,8 +670,33 @@
       };
 
       const handleTyping = () => {
-        if (ws && ws.readyState === WebSocket.OPEN && currentChat) {
-          ws.send(JSON.stringify({ type: 'typing', room: currentChat, user: currentUser }));
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && currentChat) {
+          const chatId = [currentUser, currentChat].sort().join('_');
+          wsRef.current.send(JSON.stringify({ 
+            type: 'typing', 
+            chat: chatId, 
+            user: currentUser 
+          }));
+        }
+      };
+
+      const deleteAccount = async () => {
+        if (!confirm('Möchtest du deinen Account wirklich löschen? Dies kann nicht rückgängig gemacht werden!')) {
+          return;
+        }
+
+        try {
+          // Alle Benutzerdaten löschen
+          await window.storage.set('userdata_' + currentUser, JSON.stringify({}), true);
+          await window.storage.set('chats_' + currentUser, JSON.stringify([]), true);
+          await window.storage.set('requests_' + currentUser, JSON.stringify([]), true);
+          await window.storage.set('pending_' + currentUser, JSON.stringify([]), true);
+
+          // Logout
+          handleLogout();
+          alert('Account wurde gelöscht');
+        } catch (e) {
+          setError('Fehler beim Löschen des Accounts: ' + e.message);
         }
       };
 
@@ -706,13 +770,41 @@
             <div className="p-4 border-b border-gray-200 bg-white">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-bold text-gray-800">Nachrichten</h2>
-                <button
-                  onClick={handleLogout}
-                  className="px-3 py-1 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 transition"
-                >
-                  Abmelden
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowSettings(!showSettings)}
+                    className="p-2 hover:bg-gray-100 rounded-lg transition"
+                    title="Einstellungen"
+                  >
+                    <SettingsIcon />
+                  </button>
+                  <button
+                    onClick={handleLogout}
+                    className="px-3 py-1 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 transition"
+                  >
+                    Abmelden
+                  </button>
+                </div>
               </div>
+
+              {showSettings && (
+                <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                  <h3 className="font-semibold text-gray-800 mb-3">Einstellungen</h3>
+                  <div className="space-y-2">
+                    <div className="text-sm text-gray-600">
+                      <p><strong>Benutzername:</strong> {currentUser}</p>
+                      <p><strong>Status:</strong> <span className="text-green-600">● Online</span></p>
+                    </div>
+                    <button
+                      onClick={deleteAccount}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
+                    >
+                      <TrashIcon />
+                      Account löschen
+                    </button>
+                  </div>
+                </div>
+              )}
               
               <div className="relative">
                 <input
@@ -982,4 +1074,4 @@
     ReactDOM.render(<EncryptedChat />, document.getElementById('root'));
   </script>
 </body>
-</html>p
+</html>
