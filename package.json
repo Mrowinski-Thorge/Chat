@@ -1,14 +1,15 @@
 {
   "name": "encrypted-chat-app",
-  "version": "1.0.0",
-  "description": "Ende-zu-Ende verschlüsselte Chat-Anwendung",
+  "version": "2.0.0",
+  "description": "Ende-zu-Ende verschlüsselte Chat-Anwendung mit WebSockets",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "ws": "^8.14.2"
   },
   "engines": {
     "node": ">=18.0.0"
