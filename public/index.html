@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+       <!DOCTYPE html>
 <html lang="de">
 <head>
   <meta charset="UTF-8">
@@ -57,6 +57,183 @@
       }
     };
 
+    // ============================================
+    // 🔐 ECHTE WEB CRYPTO API VERSCHLÜSSELUNG
+    // ============================================
+
+    // Passwort zu AES Key ableiten (PBKDF2 mit 300.000 Iterationen)
+    const deriveKeyFromPassword = async (password, salt) => {
+      const enc = new TextEncoder();
+      const keyMaterial = await crypto.subtle.importKey(
+        'raw',
+        enc.encode(password),
+        'PBKDF2',
+        false,
+        ['deriveKey']
+      );
+      
+      return await crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt: salt,
+          iterations: 300000,
+          hash: 'SHA-256'
+        },
+        keyMaterial,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+    };
+
+    // RSA Keypair für jeden Benutzer erstellen
+    const generateUserKeypair = async () => {
+      return await crypto.subtle.generateKey(
+        {
+          name: 'RSA-OAEP',
+          modulusLength: 2048,
+          publicExponent: new Uint8Array([1, 0, 1]),
+          hash: 'SHA-256'
+        },
+        true,
+        ['encrypt', 'decrypt']
+      );
+    };
+
+    // Private Key mit Passwort verschlüsseln
+    const encryptPrivateKey = async (privateKey, password) => {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const key = await deriveKeyFromPassword(password, salt);
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      
+      const exported = await crypto.subtle.exportKey('pkcs8', privateKey);
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        exported
+      );
+      
+      // Salt + IV + Encrypted zusammenpacken
+      const result = new Uint8Array(salt.length + iv.length + encrypted.byteLength);
+      result.set(salt, 0);
+      result.set(iv, salt.length);
+      result.set(new Uint8Array(encrypted), salt.length + iv.length);
+      
+      return btoa(String.fromCharCode(...result));
+    };
+
+    // Private Key mit Passwort entschlüsseln
+    const decryptPrivateKey = async (encryptedData, password) => {
+      const data = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
+      const salt = data.slice(0, 16);
+      const iv = data.slice(16, 28);
+      const encrypted = data.slice(28);
+      
+      const key = await deriveKeyFromPassword(password, salt);
+      
+      const decrypted = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        encrypted
+      );
+      
+      return await crypto.subtle.importKey(
+        'pkcs8',
+        decrypted,
+        { name: 'RSA-OAEP', hash: 'SHA-256' },
+        true,
+        ['decrypt']
+      );
+    };
+
+    // Public Key exportieren
+    const exportPublicKey = async (publicKey) => {
+      const exported = await crypto.subtle.exportKey('spki', publicKey);
+      return btoa(String.fromCharCode(...new Uint8Array(exported)));
+    };
+
+    // Public Key importieren
+    const importPublicKey = async (keyData) => {
+      const binary = Uint8Array.from(atob(keyData), c => c.charCodeAt(0));
+      return await crypto.subtle.importKey(
+        'spki',
+        binary,
+        { name: 'RSA-OAEP', hash: 'SHA-256' },
+        true,
+        ['encrypt']
+      );
+    };
+
+    // Nachricht verschlüsseln (für einen Empfänger)
+    const encryptMessage = async (text, recipientPublicKey) => {
+      // 1. Session Key erstellen
+      const sessionKey = await crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 },
+        true,
+        ['encrypt', 'decrypt']
+      );
+      
+      // 2. Nachricht mit Session Key verschlüsseln
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const enc = new TextEncoder();
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        sessionKey,
+        enc.encode(text)
+      );
+      
+      // 3. Session Key exportieren und mit Public Key verschlüsseln
+      const exportedSessionKey = await crypto.subtle.exportKey('raw', sessionKey);
+      const encryptedSessionKey = await crypto.subtle.encrypt(
+        { name: 'RSA-OAEP' },
+        recipientPublicKey,
+        exportedSessionKey
+      );
+      
+      return {
+        ciphertext: btoa(String.fromCharCode(...new Uint8Array(encrypted))),
+        iv: btoa(String.fromCharCode(...iv)),
+        encryptedSessionKey: btoa(String.fromCharCode(...new Uint8Array(encryptedSessionKey)))
+      };
+    };
+
+    // Nachricht entschlüsseln
+    const decryptMessage = async (encrypted, privateKey) => {
+      try {
+        // 1. Session Key entschlüsseln
+        const encryptedSessionKeyData = Uint8Array.from(atob(encrypted.encryptedSessionKey), c => c.charCodeAt(0));
+        const sessionKeyData = await crypto.subtle.decrypt(
+          { name: 'RSA-OAEP' },
+          privateKey,
+          encryptedSessionKeyData
+        );
+        
+        // 2. Session Key importieren
+        const sessionKey = await crypto.subtle.importKey(
+          'raw',
+          sessionKeyData,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['decrypt']
+        );
+        
+        // 3. Nachricht entschlüsseln
+        const iv = Uint8Array.from(atob(encrypted.iv), c => c.charCodeAt(0));
+        const ciphertext = Uint8Array.from(atob(encrypted.ciphertext), c => c.charCodeAt(0));
+        
+        const decrypted = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv },
+          sessionKey,
+          ciphertext
+        );
+        
+        return new TextDecoder().decode(decrypted);
+      } catch (e) {
+        console.error('Entschlüsselung fehlgeschlagen:', e);
+        return '[Entschlüsselung fehlgeschlagen]';
+      }
+    };
+
     // Icons
     const LockIcon = () => (
       <svg className="w-12 h-12 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -88,9 +265,9 @@
       </svg>
     );
 
-    const PaperclipIcon = () => (
-      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+    const CheckIcon = () => (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
       </svg>
     );
 
@@ -99,6 +276,7 @@
       const [username, setUsername] = useState('');
       const [password, setPassword] = useState('');
       const [currentUser, setCurrentUser] = useState('');
+      const [privateKey, setPrivateKey] = useState(null);
       const [currentChat, setCurrentChat] = useState(null);
       const [message, setMessage] = useState('');
       const [chats, setChats] = useState([]);
@@ -108,49 +286,37 @@
       const [searchQuery, setSearchQuery] = useState('');
       const [searchResults, setSearchResults] = useState([]);
       const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+      const [chatRequests, setChatRequests] = useState([]);
+      const [pendingRequests, setPendingRequests] = useState([]);
+      const [selectedMessage, setSelectedMessage] = useState(null);
+      const [typingUsers, setTypingUsers] = useState({});
       const messagesEndRef = useRef(null);
 
-      const emojis = ['😀', '😂', '😍', '🥰', '😎', '🤔', '👍', '👏', '🎉', '❤️', '🔥', '✨', '💯', '🚀', '⭐', '💪', '🎈', '🌟', '💝', '🌈'];
-
-      // Einfache aber sichere Verschlüsselung
-      const simpleEncrypt = (text, key) => {
-        const combined = text + '|||' + key;
-        return btoa(unescape(encodeURIComponent(combined)));
-      };
-
-      const simpleDecrypt = (encrypted, key) => {
-        try {
-          const decoded = decodeURIComponent(escape(atob(encrypted)));
-          const parts = decoded.split('|||');
-          if (parts.length === 2 && parts[1] === key) {
-            return parts[0];
-          }
-          return '[Falsches Passwort]';
-        } catch (e) {
-          return '[Entschlüsselung fehlgeschlagen]';
-        }
-      };
-
-      const hashPassword = (pass) => {
-        let hash = 0;
-        const str = pass + 'salt_2025';
-        for (let i = 0; i < str.length; i++) {
-          const char = str.charCodeAt(i);
-          hash = ((hash << 5) - hash) + char;
-          hash = hash & hash;
-        }
-        return hash.toString(36);
-      };
+      const emojis = ['😀', '😂', '😍', '🥰', '😎', '🤔', '👍', '👏', '🎉', '❤️', '🔥', '✨', '💯', '🚀', '⭐', '💪'];
+      const reactionEmojis = ['❤️', '😂', '👍', '🔥', '🎉', '😮'];
 
       useEffect(() => {
-        loadChats();
+        loadUserData();
         
         const wsConnection = connectWebSocket((data) => {
           if (data.type === 'users_update') {
             setOnlineUsers(data.users);
           }
           if (data.type === 'new_message') {
-            loadMessagesForChat(currentChat);
+            if (currentChat) loadMessagesForChat(currentChat);
+          }
+          if (data.type === 'chat_request') {
+            loadChatRequests();
+          }
+          if (data.type === 'typing' && data.room === currentChat) {
+            setTypingUsers(prev => ({ ...prev, [data.user]: true }));
+            setTimeout(() => {
+              setTypingUsers(prev => {
+                const newTyping = { ...prev };
+                delete newTyping[data.user];
+                return newTyping;
+              });
+            }, 3000);
           }
         });
 
@@ -172,7 +338,13 @@
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, [messages, currentChat]);
 
-      const loadChats = async () => {
+      useEffect(() => {
+        if (isLoggedIn) {
+          loadChatRequests();
+        }
+      }, [isLoggedIn]);
+
+      const loadUserData = async () => {
         try {
           const result = await window.storage.get('chats_' + currentUser, true);
           setChats(JSON.parse(result.value));
@@ -181,17 +353,37 @@
         }
       };
 
+      const loadChatRequests = async () => {
+        try {
+          const result = await window.storage.get('requests_' + currentUser, true);
+          setChatRequests(JSON.parse(result.value));
+        } catch (e) {
+          setChatRequests([]);
+        }
+
+        try {
+          const result = await window.storage.get('pending_' + currentUser, true);
+          setPendingRequests(JSON.parse(result.value));
+        } catch (e) {
+          setPendingRequests([]);
+        }
+      };
+
       const loadMessagesForChat = async (chatUser) => {
-        if (!chatUser) return;
+        if (!chatUser || !privateKey) return;
         
         const chatId = [currentUser, chatUser].sort().join('_');
         try {
           const result = await window.storage.get(`messages_${chatId}`, true);
           const encryptedMessages = JSON.parse(result.value);
-          const decryptedMessages = encryptedMessages.map(msg => ({
-            ...msg,
-            text: simpleDecrypt(msg.text, password)
-          }));
+          
+          const decryptedMessages = await Promise.all(
+            encryptedMessages.map(async msg => ({
+              ...msg,
+              text: await decryptMessage(msg.encryptedData, privateKey)
+            }))
+          );
+          
           setMessages(prev => ({ ...prev, [chatUser]: decryptedMessages }));
         } catch (e) {
           setMessages(prev => ({ ...prev, [chatUser]: [] }));
@@ -211,29 +403,34 @@
         }
 
         try {
-          let users = {};
+          let userData = {};
           try {
-            const result = await window.storage.get('users', true);
-            users = JSON.parse(result.value);
+            const result = await window.storage.get('userdata_' + username, true);
+            userData = JSON.parse(result.value);
           } catch (e) {
-            users = {};
+            // Neuer Benutzer - Keypair erstellen
+            const keypair = await generateUserKeypair();
+            const encryptedPrivKey = await encryptPrivateKey(keypair.privateKey, password);
+            const publicKey = await exportPublicKey(keypair.publicKey);
+            
+            userData = {
+              encryptedPrivateKey: encryptedPrivKey,
+              publicKey: publicKey
+            };
+            
+            await window.storage.set('userdata_' + username, JSON.stringify(userData), true);
           }
 
-          const hashedPass = hashPassword(password);
-
-          if (users[username]) {
-            if (users[username] === hashedPass) {
-              setCurrentUser(username);
-              setIsLoggedIn(true);
-              await loadChats();
-            } else {
-              setError('Falsches Passwort');
-            }
-          } else {
-            users[username] = hashedPass;
-            await window.storage.set('users', JSON.stringify(users), true);
+          // Private Key entschlüsseln
+          try {
+            const privKey = await decryptPrivateKey(userData.encryptedPrivateKey, password);
+            setPrivateKey(privKey);
             setCurrentUser(username);
             setIsLoggedIn(true);
+            await loadUserData();
+            await loadChatRequests();
+          } catch (e) {
+            setError('Falsches Passwort');
           }
         } catch (e) {
           setError('Fehler: ' + e.message);
@@ -254,27 +451,96 @@
         }
       };
 
-      const startChat = async (targetUser) => {
-        if (!chats.includes(targetUser)) {
-          const newChats = [...chats, targetUser];
+      const sendChatRequest = async (targetUser) => {
+        try {
+          let theirRequests = [];
+          try {
+            const result = await window.storage.get('requests_' + targetUser, true);
+            theirRequests = JSON.parse(result.value);
+          } catch (e) {
+            theirRequests = [];
+          }
+
+          if (!theirRequests.includes(currentUser)) {
+            theirRequests.push(currentUser);
+            await window.storage.set('requests_' + targetUser, JSON.stringify(theirRequests), true);
+          }
+
+          let myPending = pendingRequests;
+          if (!myPending.includes(targetUser)) {
+            myPending = [...myPending, targetUser];
+            setPendingRequests(myPending);
+            await window.storage.set('pending_' + currentUser, JSON.stringify(myPending), true);
+          }
+
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'chat_request', to: targetUser }));
+          }
+
+          setSearchQuery('');
+          setSearchResults([]);
+          setError('');
+        } catch (e) {
+          setError('Fehler beim Senden der Anfrage');
+        }
+      };
+
+      const acceptChatRequest = async (requester) => {
+        try {
+          const newChats = [...chats, requester];
           setChats(newChats);
           await window.storage.set('chats_' + currentUser, JSON.stringify(newChats), true);
+
+          let theirChats = [];
+          try {
+            const result = await window.storage.get('chats_' + requester, true);
+            theirChats = JSON.parse(result.value);
+          } catch (e) {
+            theirChats = [];
+          }
+
+          if (!theirChats.includes(currentUser)) {
+            theirChats.push(currentUser);
+            await window.storage.set('chats_' + requester, JSON.stringify(theirChats), true);
+          }
+
+          const newRequests = chatRequests.filter(r => r !== requester);
+          setChatRequests(newRequests);
+          await window.storage.set('requests_' + currentUser, JSON.stringify(newRequests), true);
+
+          setCurrentChat(requester);
+          await loadMessagesForChat(requester);
+        } catch (e) {
+          setError('Fehler beim Akzeptieren');
         }
-        setCurrentChat(targetUser);
-        await loadMessagesForChat(targetUser);
-        setSearchQuery('');
-        setSearchResults([]);
+      };
+
+      const declineChatRequest = async (requester) => {
+        try {
+          const newRequests = chatRequests.filter(r => r !== requester);
+          setChatRequests(newRequests);
+          await window.storage.set('requests_' + currentUser, JSON.stringify(newRequests), true);
+        } catch (e) {
+          setError('Fehler beim Ablehnen');
+        }
       };
 
       const handleSendMessage = async () => {
-        if (!message.trim() || !currentChat) return;
+        if (!message.trim() || !currentChat || !privateKey) return;
 
         try {
-          const encryptedText = simpleEncrypt(message, password);
+          // Public Key des Empfängers laden
+          const recipientData = await window.storage.get('userdata_' + currentChat, true);
+          const recipientPublicKey = await importPublicKey(JSON.parse(recipientData.value).publicKey);
+
+          // Nachricht verschlüsseln
+          const encrypted = await encryptMessage(message, recipientPublicKey);
+
           const newMessage = {
             id: Date.now(),
             user: currentUser,
-            text: encryptedText,
+            encryptedData: encrypted,
+            reactions: {},
             timestamp: new Date().toISOString()
           };
 
@@ -303,6 +569,43 @@
         }
       };
 
+      const addReaction = async (messageId, emoji) => {
+        if (!currentChat) return;
+
+        try {
+          const chatId = [currentUser, currentChat].sort().join('_');
+          const result = await window.storage.get(`messages_${chatId}`, true);
+          let allMessages = JSON.parse(result.value);
+
+          const msgIndex = allMessages.findIndex(m => m.id === messageId);
+          if (msgIndex !== -1) {
+            if (!allMessages[msgIndex].reactions) {
+              allMessages[msgIndex].reactions = {};
+            }
+            if (!allMessages[msgIndex].reactions[emoji]) {
+              allMessages[msgIndex].reactions[emoji] = [];
+            }
+            
+            const userIndex = allMessages[msgIndex].reactions[emoji].indexOf(currentUser);
+            if (userIndex === -1) {
+              allMessages[msgIndex].reactions[emoji].push(currentUser);
+            } else {
+              allMessages[msgIndex].reactions[emoji].splice(userIndex, 1);
+              if (allMessages[msgIndex].reactions[emoji].length === 0) {
+                delete allMessages[msgIndex].reactions[emoji];
+              }
+            }
+
+            await window.storage.set(`messages_${chatId}`, JSON.stringify(allMessages), true);
+            await loadMessagesForChat(currentChat);
+          }
+        } catch (e) {
+          console.error('Fehler beim Reagieren:', e);
+        }
+        
+        setSelectedMessage(null);
+      };
+
       const handleLogout = () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'user_offline', username: currentUser }));
@@ -313,6 +616,7 @@
         setMessages({});
         setChats([]);
         setPassword('');
+        setPrivateKey(null);
       };
 
       const handleKeyPress = (e) => {
@@ -323,6 +627,12 @@
           } else {
             handleAuth();
           }
+        }
+      };
+
+      const handleTyping = () => {
+        if (ws && ws.readyState === WebSocket.OPEN && currentChat) {
+          ws.send(JSON.stringify({ type: 'typing', room: currentChat, user: currentUser }));
         }
       };
 
@@ -345,7 +655,8 @@
                 <LockIcon />
               </div>
               <h1 className="text-3xl font-bold text-center mb-2 text-gray-800">Sicherer Chat</h1>
-              <p className="text-center text-gray-600 mb-8">Ende-zu-Ende verschlüsselt</p>
+              <p className="text-center text-gray-600 mb-2">Ende-zu-Ende verschlüsselt</p>
+              <p className="text-center text-xs text-gray-500 mb-8">RSA-2048 + AES-256-GCM</p>
               
               <div className="space-y-4">
                 <input
@@ -367,7 +678,7 @@
                 />
 
                 {error && (
-                  <div className="bg-red-100 border-2 border-red-400 text-red-700 px-4 py-3 rounded-xl">
+                  <div className="bg-red-100 border-2 border-red-400 text-red-700 px-4 py-3 rounded-xl text-sm">
                     {error}
                   </div>
                 )}
@@ -379,6 +690,10 @@
                   Anmelden / Registrieren
                 </button>
               </div>
+
+              <p className="text-xs text-gray-500 text-center mt-6">
+                Server kann Nachrichten nicht lesen
+              </p>
             </div>
           </div>
         );
@@ -386,7 +701,7 @@
 
       return (
         <div className="h-screen flex bg-gray-100">
-          {/* Sidebar - Chatliste */}
+          {/* Sidebar */}
           <div className="w-80 bg-white border-r border-gray-200 flex flex-col">
             <div className="p-4 border-b border-gray-200 bg-white">
               <div className="flex items-center justify-between mb-4">
@@ -420,14 +735,19 @@
                   {searchResults.map(user => (
                     <button
                       key={user}
-                      onClick={() => startChat(user)}
+                      onClick={() => sendChatRequest(user)}
                       className="w-full text-left px-4 py-3 hover:bg-blue-50 flex items-center justify-between border-b border-gray-100 last:border-0"
                     >
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center text-white font-bold">
                           {user[0].toUpperCase()}
                         </div>
-                        <span className="font-medium">{user}</span>
+                        <div>
+                          <span className="font-medium">{user}</span>
+                          {pendingRequests.includes(user) && (
+                            <span className="text-xs text-gray-500"> (Anfrage gesendet)</span>
+                          )}
+                        </div>
                       </div>
                       {onlineUsers.includes(user) && (
                         <span className="w-3 h-3 bg-green-500 rounded-full"></span>
@@ -437,6 +757,36 @@
                 </div>
               )}
             </div>
+
+            {chatRequests.length > 0 && (
+              <div className="bg-blue-50 border-b border-blue-200 p-3">
+                <p className="text-sm font-semibold text-blue-900 mb-2">Chat-Anfragen ({chatRequests.length})</p>
+                {chatRequests.map(requester => (
+                  <div key={requester} className="bg-white rounded-lg p-3 mb-2 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center text-white font-bold text-sm">
+                        {requester[0].toUpperCase()}
+                      </div>
+                      <span className="font-medium text-sm">{requester}</span>
+                    </div>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => acceptChatRequest(requester)}
+                        className="p-1 bg-green-500 text-white rounded hover:bg-green-600"
+                      >
+                        <CheckIcon />
+                      </button>
+                      <button
+                        onClick={() => declineChatRequest(requester)}
+                        className="p-1 bg-red-500 text-white rounded hover:bg-red-600"
+                      >
+                        <XIcon />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <div className="flex-1 overflow-y-auto">
               {chats.length === 0 ? (
@@ -480,7 +830,6 @@
           <div className="flex-1 flex flex-col">
             {currentChat ? (
               <>
-                {/* Chat Header */}
                 <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center text-white font-bold">
@@ -489,7 +838,7 @@
                     <div>
                       <p className="font-semibold text-gray-900">{currentChat}</p>
                       <p className="text-sm text-gray-500">
-                        {onlineUsers.includes(currentChat) ? 'Online' : 'Offline'}
+                        {typingUsers[currentChat] ? 'tippt...' : onlineUsers.includes(currentChat) ? 'Online' : 'Offline'}
                       </p>
                     </div>
                   </div>
@@ -501,7 +850,6 @@
                   </button>
                 </div>
 
-                {/* Nachrichten */}
                 <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
                   {(messages[currentChat] || []).length === 0 ? (
                     <div className="text-center text-gray-500 mt-20">
@@ -514,18 +862,56 @@
                         key={msg.id}
                         className={`flex mb-4 ${msg.user === currentUser ? 'justify-end' : 'justify-start'}`}
                       >
-                        <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-2xl ${
-                          msg.user === currentUser
-                            ? 'bg-blue-500 text-white rounded-br-none'
-                            : 'bg-white text-gray-800 rounded-bl-none shadow'
-                        }`}>
-                          <p className="break-words whitespace-pre-wrap">{msg.text}</p>
-                          <p className={`text-xs mt-1 ${msg.user === currentUser ? 'text-blue-100' : 'text-gray-500'}`}>
-                            {new Date(msg.timestamp).toLocaleTimeString('de-DE', {
-                              hour: '2-digit',
-                              minute: '2-digit'
-                            })}
-                          </p>
+                        <div className="relative">
+                          <div 
+                            className={`max-w-xs lg:max-w-md px-4 py-2 rounded-2xl cursor-pointer ${
+                              msg.user === currentUser
+                                ? 'bg-blue-500 text-white rounded-br-none'
+                                : 'bg-white text-gray-800 rounded-bl-none shadow'
+                            }`}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              setSelectedMessage(msg.id);
+                            }}
+                            onClick={() => setSelectedMessage(msg.id === selectedMessage ? null : msg.id)}
+                          >
+                            <p className="break-words whitespace-pre-wrap">{msg.text}</p>
+                            <p className={`text-xs mt-1 ${msg.user === currentUser ? 'text-blue-100' : 'text-gray-500'}`}>
+                              {new Date(msg.timestamp).toLocaleTimeString('de-DE', {
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              })}
+                            </p>
+                            
+                            {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                              <div className="flex gap-1 mt-2 flex-wrap">
+                                {Object.entries(msg.reactions).map(([emoji, users]) => (
+                                  users.length > 0 && (
+                                    <span 
+                                      key={emoji}
+                                      className="bg-white bg-opacity-20 rounded-full px-2 py-0.5 text-sm flex items-center gap-1"
+                                    >
+                                      {emoji} {users.length}
+                                    </span>
+                                  )
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {selectedMessage === msg.id && (
+                            <div className="absolute bottom-full mb-2 bg-white rounded-lg shadow-lg p-2 flex gap-2 z-10">
+                              {reactionEmojis.map(emoji => (
+                                <button
+                                  key={emoji}
+                                  onClick={() => addReaction(msg.id, emoji)}
+                                  className="text-2xl hover:scale-125 transition-transform"
+                                >
+                                  {emoji}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))
@@ -533,7 +919,6 @@
                   <div ref={messagesEndRef} />
                 </div>
 
-                {/* Eingabebereich */}
                 <div className="bg-white border-t border-gray-200 p-4">
                   {showEmojiPicker && (
                     <div className="mb-3 p-3 bg-gray-50 rounded-2xl flex flex-wrap gap-2">
@@ -555,12 +940,12 @@
                     >
                       <SmileIcon />
                     </button>
-                    <button className="p-2 text-gray-500 hover:text-gray-700 transition">
-                      <PaperclipIcon />
-                    </button>
                     <textarea
                       value={message}
-                      onChange={(e) => setMessage(e.target.value)}
+                      onChange={(e) => {
+                        setMessage(e.target.value);
+                        handleTyping();
+                      }}
                       onKeyPress={handleKeyPress}
                       placeholder="Nachricht..."
                       rows="1"
@@ -597,4 +982,4 @@
     ReactDOM.render(<EncryptedChat />, document.getElementById('root'));
   </script>
 </body>
-</html>
+</html>p
