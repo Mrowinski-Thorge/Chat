@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sicherer Chat</title>
+  <title>Sicherer Chat V2</title>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -61,7 +61,7 @@
     // 🔐 ECHTE WEB CRYPTO API VERSCHLÜSSELUNG
     // ============================================
 
-    // Passwort zu AES Key ableiten (PBKDF2 mit 300.000 Iterationen)
+    // Passwort zu AES Key ableiten
     const deriveKeyFromPassword = async (password, salt) => {
       const enc = new TextEncoder();
       const keyMaterial = await crypto.subtle.importKey(
@@ -86,7 +86,7 @@
       );
     };
 
-    // RSA Keypair für jeden Benutzer erstellen
+    // RSA Keypair erstellen
     const generateUserKeypair = async () => {
       return await crypto.subtle.generateKey(
         {
@@ -100,7 +100,7 @@
       );
     };
 
-    // Private Key mit Passwort verschlüsseln
+    // Private Key verschlüsseln
     const encryptPrivateKey = async (privateKey, password) => {
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const key = await deriveKeyFromPassword(password, salt);
@@ -113,7 +113,6 @@
         exported
       );
       
-      // Salt + IV + Encrypted zusammenpacken
       const result = new Uint8Array(salt.length + iv.length + encrypted.byteLength);
       result.set(salt, 0);
       result.set(iv, salt.length);
@@ -122,7 +121,7 @@
       return btoa(String.fromCharCode(...result));
     };
 
-    // Private Key mit Passwort entschlüsseln
+    // Private Key entschlüsseln
     const decryptPrivateKey = async (encryptedData, password) => {
       const data = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
       const salt = data.slice(0, 16);
@@ -146,13 +145,11 @@
       );
     };
 
-    // Public Key exportieren
     const exportPublicKey = async (publicKey) => {
       const exported = await crypto.subtle.exportKey('spki', publicKey);
       return btoa(String.fromCharCode(...new Uint8Array(exported)));
     };
 
-    // Public Key importieren
     const importPublicKey = async (keyData) => {
       const binary = Uint8Array.from(atob(keyData), c => c.charCodeAt(0));
       return await crypto.subtle.importKey(
@@ -164,16 +161,14 @@
       );
     };
 
-    // Nachricht verschlüsseln (für einen Empfänger)
+    // Nachricht verschlüsseln
     const encryptMessage = async (text, recipientPublicKey) => {
-      // 1. Session Key erstellen
       const sessionKey = await crypto.subtle.generateKey(
         { name: 'AES-GCM', length: 256 },
         true,
         ['encrypt', 'decrypt']
       );
       
-      // 2. Nachricht mit Session Key verschlüsseln
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const enc = new TextEncoder();
       const encrypted = await crypto.subtle.encrypt(
@@ -182,7 +177,6 @@
         enc.encode(text)
       );
       
-      // 3. Session Key exportieren und mit Public Key verschlüsseln
       const exportedSessionKey = await crypto.subtle.exportKey('raw', sessionKey);
       const encryptedSessionKey = await crypto.subtle.encrypt(
         { name: 'RSA-OAEP' },
@@ -200,7 +194,6 @@
     // Nachricht entschlüsseln
     const decryptMessage = async (encrypted, privateKey) => {
       try {
-        // 1. Session Key entschlüsseln
         const encryptedSessionKeyData = Uint8Array.from(atob(encrypted.encryptedSessionKey), c => c.charCodeAt(0));
         const sessionKeyData = await crypto.subtle.decrypt(
           { name: 'RSA-OAEP' },
@@ -208,7 +201,6 @@
           encryptedSessionKeyData
         );
         
-        // 2. Session Key importieren
         const sessionKey = await crypto.subtle.importKey(
           'raw',
           sessionKeyData,
@@ -217,7 +209,6 @@
           ['decrypt']
         );
         
-        // 3. Nachricht entschlüsseln
         const iv = Uint8Array.from(atob(encrypted.iv), c => c.charCodeAt(0));
         const ciphertext = Uint8Array.from(atob(encrypted.ciphertext), c => c.charCodeAt(0));
         
@@ -311,7 +302,11 @@
       const reactionEmojis = ['❤️', '😂', '👍', '🔥', '🎉', '😮'];
 
       useEffect(() => {
-        loadUserData();
+        // Initialer Load
+        if (currentUser) {
+            loadUserData();
+            loadChatRequests();
+        }
         
         wsRef.current = connectWebSocket((data) => {
           if (data.type === 'users_update') {
@@ -322,15 +317,20 @@
           }
           if (data.type === 'chat_request') {
             loadChatRequests();
+            // Optional: UserData auch neu laden, falls sich was geändert hat
             loadUserData();
           }
           if (data.type === 'chat_accepted') {
-            // Chat wurde akzeptiert - lade Daten neu
-            loadChatRequests();
-            loadUserData();
+            // WICHTIG: Wenn jemand anders angenommen hat, müssen wir
+            // unsere Kontaktliste neu laden, damit der neue Chat erscheint.
+            // Wir warten kurz, um sicherzustellen, dass der Speicher geschrieben wurde.
+            console.log("Chat accepted event received via WS");
+            setTimeout(() => {
+                loadUserData();      // Lädt die Chat-Liste neu
+                loadChatRequests();  // Löscht die Pending-Anzeige
+            }, 500);
           }
           if (data.type === 'chat_declined') {
-            // Chat wurde abgelehnt - lade Daten neu
             loadChatRequests();
             loadUserData();
           }
@@ -356,7 +356,7 @@
             wsRef.current.close();
           }
         };
-      }, []);
+      }, [currentUser, currentChat]); // Abhängigkeit angepasst
 
       useEffect(() => {
         if (isLoggedIn && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -367,12 +367,9 @@
       useEffect(() => {
         if (currentChat) {
           loadMessagesForChat(currentChat);
-          
-          // Nachrichten alle 2 Sekunden neu laden für Live-Updates
           const interval = setInterval(() => {
             loadMessagesForChat(currentChat);
           }, 2000);
-          
           return () => clearInterval(interval);
         }
       }, [currentChat]);
@@ -386,9 +383,10 @@
           loadUserData();
           loadChatRequests();
           
-          // Regelmäßig nach neuen Anfragen suchen
           const interval = setInterval(() => {
             loadChatRequests();
+            // Auch UserData regelmäßig refreshen, um neue Chats zu sehen
+            loadUserData(); 
           }, 3000);
           
           return () => clearInterval(interval);
@@ -434,7 +432,6 @@
             encryptedMessages.map(async msg => {
               let decryptedText = '';
               
-              // Versuche mit encryptedData (für Empfänger)
               if (msg.user !== currentUser && msg.encryptedData) {
                 try {
                   decryptedText = await decryptMessage(msg.encryptedData, privateKey);
@@ -442,7 +439,6 @@
                   decryptedText = '[Entschlüsselung fehlgeschlagen]';
                 }
               }
-              // Versuche mit encryptedForSender (für Sender)
               else if (msg.user === currentUser && msg.encryptedForSender) {
                 try {
                   decryptedText = await decryptMessage(msg.encryptedForSender, privateKey);
@@ -450,7 +446,6 @@
                   decryptedText = '[Entschlüsselung fehlgeschlagen]';
                 }
               }
-              // Fallback: Versuche encryptedData
               else if (msg.encryptedData) {
                 try {
                   decryptedText = await decryptMessage(msg.encryptedData, privateKey);
@@ -490,7 +485,6 @@
             const result = await window.storage.get('userdata_' + username, true);
             userData = JSON.parse(result.value);
           } catch (e) {
-            // Neuer Benutzer - Keypair erstellen
             const keypair = await generateUserKeypair();
             const encryptedPrivKey = await encryptPrivateKey(keypair.privateKey, password);
             const publicKey = await exportPublicKey(keypair.publicKey);
@@ -503,14 +497,12 @@
             await window.storage.set('userdata_' + username, JSON.stringify(userData), true);
           }
 
-          // Private Key entschlüsseln
           try {
             const privKey = await decryptPrivateKey(userData.encryptedPrivateKey, password);
             setPrivateKey(privKey);
             setCurrentUser(username);
             setIsLoggedIn(true);
             
-            // Benutzer in der globalen Benutzerliste registrieren
             let allUsers = [];
             try {
               const usersResult = await window.storage.get('all_users', true);
@@ -524,6 +516,7 @@
               await window.storage.set('all_users', JSON.stringify(allUsers), true);
             }
             
+            // Erst hier laden wir Daten
             await loadUserData();
             await loadChatRequests();
           } catch (e) {
@@ -543,7 +536,6 @@
         }
 
         try {
-          // Hole alle registrierten Benutzer aus der globalen Liste
           let allUsers = [];
           try {
             const usersResult = await window.storage.get('all_users', true);
@@ -552,27 +544,11 @@
             allUsers = [];
           }
           
-          console.log('Alle Benutzer:', allUsers);
-          
-          // Suche nach Übereinstimmung
           const matchedUsers = allUsers.filter(u => 
-            u.toLowerCase().includes(query.toLowerCase())
+            u.toLowerCase().includes(query.toLowerCase()) && u !== currentUser
           );
           
-          console.log('Übereinstimmende Benutzer:', matchedUsers);
-          
-          // Filtere den aktuellen Benutzer und bereits verbundene aus
-          const filteredUsers = matchedUsers.filter(u => {
-            const isNotSelf = u !== currentUser;
-            const notInChats = !chats.includes(u);
-            const notInRequests = !chatRequests.includes(u);
-            const notInPending = !pendingRequests.includes(u);
-            
-            return isNotSelf && notInChats && notInRequests && notInPending;
-          });
-          
-          console.log('Gefilterte Benutzer:', filteredUsers);
-          setSearchResults(filteredUsers);
+          setSearchResults(matchedUsers);
           
         } catch (e) {
           console.error('Suchfehler:', e);
@@ -581,6 +557,12 @@
       };
 
       const sendChatRequest = async (targetUser) => {
+        // SICHERHEIT: Prüfen ob bereits angefragt oder verbunden
+        if (chats.includes(targetUser) || pendingRequests.includes(targetUser)) {
+            console.log("Bereits angefragt oder verbunden.");
+            return;
+        }
+
         try {
           let theirRequests = [];
           try {
@@ -595,10 +577,10 @@
             await window.storage.set('requests_' + targetUser, JSON.stringify(theirRequests), true);
           }
 
-          let myPending = pendingRequests;
+          let myPending = [...pendingRequests];
           if (!myPending.includes(targetUser)) {
-            myPending = [...myPending, targetUser];
-            setPendingRequests(myPending);
+            myPending.push(targetUser);
+            setPendingRequests(myPending); // Sofort UI update
             await window.storage.set('pending_' + currentUser, JSON.stringify(myPending), true);
           }
 
@@ -609,6 +591,9 @@
           setSearchQuery('');
           setSearchResults([]);
           setError('');
+          
+          // Daten neu laden zur Sicherheit
+          loadChatRequests();
         } catch (e) {
           setError('Fehler beim Senden der Anfrage');
         }
@@ -616,7 +601,7 @@
 
       const acceptChatRequest = async (requester) => {
         try {
-          // Füge Requester zu meinen Chats hinzu (Empfänger)
+          // 1. Mich selbst aktualisieren (Empfänger)
           let newChats = [...chats];
           if (!newChats.includes(requester)) {
             newChats.push(requester);
@@ -624,7 +609,8 @@
             await window.storage.set('chats_' + currentUser, JSON.stringify(newChats), true);
           }
 
-          // Füge mich zu deren Chats hinzu (Sender bekommt jetzt auch den Chat)
+          // 2. Den Anfrager aktualisieren (Sender)
+          // Das ist wichtig, damit der Sender den Chat auch sieht.
           let theirChats = [];
           try {
             const result = await window.storage.get('chats_' + requester, true);
@@ -635,21 +621,20 @@
 
           if (!theirChats.includes(currentUser)) {
             theirChats.push(currentUser);
+            // Wir warten explizit auf das Speichern
             await window.storage.set('chats_' + requester, JSON.stringify(theirChats), true);
           }
 
-          // Entferne aus meinen Anfragen (Empfänger)
+          // 3. Anfragen bereinigen
           const newRequests = chatRequests.filter(r => r !== requester);
           setChatRequests(newRequests);
           await window.storage.set('requests_' + currentUser, JSON.stringify(newRequests), true);
 
-          // Entferne aus deren Pending-Liste (Sender)
           try {
             const theirPendingResult = await window.storage.get('pending_' + requester, true);
             let theirPending = JSON.parse(theirPendingResult.value);
             theirPending = theirPending.filter(p => p !== currentUser);
             await window.storage.set('pending_' + requester, JSON.stringify(theirPending), true);
-            setPendingRequests(theirPending); // Aktualisiere auch lokal
           } catch (e) {
             console.log('Keine Pending-Liste gefunden');
           }
@@ -657,7 +642,7 @@
           setCurrentChat(requester);
           await loadMessagesForChat(requester);
           
-          // Sende Benachrichtigung über WebSocket
+          // 4. WebSocket Nachricht senden NACHDEM alles gespeichert ist
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ 
               type: 'chat_accepted', 
@@ -672,12 +657,10 @@
 
       const declineChatRequest = async (requester) => {
         try {
-          // Entferne aus meinen Anfragen (Empfänger)
           const newRequests = chatRequests.filter(r => r !== requester);
           setChatRequests(newRequests);
           await window.storage.set('requests_' + currentUser, JSON.stringify(newRequests), true);
 
-          // Entferne aus deren Pending-Liste (Sender kann jetzt neu anfragen)
           try {
             const theirPendingResult = await window.storage.get('pending_' + requester, true);
             let theirPending = JSON.parse(theirPendingResult.value);
@@ -687,7 +670,6 @@
             console.log('Keine Pending-Liste gefunden');
           }
 
-          // Sende Benachrichtigung über WebSocket
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ 
               type: 'chat_declined', 
@@ -704,14 +686,12 @@
         if (!message.trim() || !currentChat || !privateKey) return;
 
         try {
-          // Hole mein eigenes Public Key und Public Key des Empfängers
           const myData = await window.storage.get('userdata_' + currentUser, true);
           const myPublicKey = await importPublicKey(JSON.parse(myData.value).publicKey);
           
           const recipientData = await window.storage.get('userdata_' + currentChat, true);
           const recipientPublicKey = await importPublicKey(JSON.parse(recipientData.value).publicKey);
 
-          // Verschlüssele Nachricht für BEIDE (Sender und Empfänger)
           const encryptedForRecipient = await encryptMessage(message, recipientPublicKey);
           const encryptedForMe = await encryptMessage(message, myPublicKey);
 
@@ -829,13 +809,11 @@
         }
 
         try {
-          // Alle Benutzerdaten löschen
           await window.storage.set('userdata_' + currentUser, JSON.stringify({}), true);
           await window.storage.set('chats_' + currentUser, JSON.stringify([]), true);
           await window.storage.set('requests_' + currentUser, JSON.stringify([]), true);
           await window.storage.set('pending_' + currentUser, JSON.stringify([]), true);
 
-          // Logout
           handleLogout();
           alert('Account wurde gelöscht');
         } catch (e) {
@@ -861,7 +839,7 @@
               <div className="flex items-center justify-center mb-6">
                 <LockIcon />
               </div>
-              <h1 className="text-3xl font-bold text-center mb-2 text-gray-800">Sicherer Chat</h1>
+              <h1 className="text-3xl font-bold text-center mb-2 text-gray-800">Sicherer Chat V2</h1>
               <p className="text-center text-gray-600 mb-2">Ende-zu-Ende verschlüsselt</p>
               <p className="text-center text-xs text-gray-500 mb-8">RSA-2048 + AES-256-GCM</p>
               
@@ -963,10 +941,10 @@
               </div>
               
               {searchQuery && searchQuery.trim().length > 0 && (
-                <div className="mt-2 bg-white border border-gray-200 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+                <div className="mt-2 bg-white border border-gray-200 rounded-lg shadow-lg max-h-64 overflow-y-auto z-50 absolute w-72">
                   {searchResults.length === 0 ? (
                     <div className="px-4 py-3 text-center text-gray-500 text-sm">
-                      {error || 'Keine Benutzer gefunden'}
+                      Keine Benutzer gefunden
                     </div>
                   ) : (
                     searchResults.map(user => {
@@ -985,30 +963,27 @@
                           disabled={isPending || hasRequest || isConnected}
                           className={`w-full text-left px-4 py-3 flex items-center justify-between border-b border-gray-100 last:border-0 ${
                             isPending || hasRequest || isConnected 
-                              ? 'bg-gray-100 cursor-not-allowed opacity-50' 
+                              ? 'bg-gray-50 cursor-not-allowed' 
                               : 'hover:bg-blue-50 cursor-pointer'
                           }`}
                         >
                           <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center text-white font-bold">
+                            <div className="w-8 h-8 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center text-white font-bold text-xs">
                               {user[0].toUpperCase()}
                             </div>
                             <div>
-                              <span className="font-medium">{user}</span>
+                              <span className="font-medium block">{user}</span>
                               {isPending && (
-                                <span className="text-xs text-orange-500 block">⏳ Anfrage gesendet</span>
+                                <span className="text-xs text-orange-500">⏳ Anfrage gesendet</span>
                               )}
                               {hasRequest && (
-                                <span className="text-xs text-blue-500 block">📩 Hat dir angefragt</span>
+                                <span className="text-xs text-blue-500">📩 Anfrage erhalten</span>
                               )}
                               {isConnected && (
-                                <span className="text-xs text-green-500 block">✓ Bereits verbunden</span>
+                                <span className="text-xs text-green-500">✓ Verbunden</span>
                               )}
                             </div>
                           </div>
-                          {onlineUsers.includes(user) && !isPending && !hasRequest && !isConnected && (
-                            <span className="w-3 h-3 bg-green-500 rounded-full"></span>
-                          )}
                         </button>
                       );
                     })
@@ -1021,7 +996,7 @@
               <div className="bg-blue-50 border-b border-blue-200 p-3">
                 <p className="text-sm font-semibold text-blue-900 mb-2">Chat-Anfragen ({chatRequests.length})</p>
                 {chatRequests.map(requester => (
-                  <div key={requester} className="bg-white rounded-lg p-3 mb-2 flex items-center justify-between">
+                  <div key={requester} className="bg-white rounded-lg p-3 mb-2 flex items-center justify-between shadow-sm">
                     <div className="flex items-center gap-2">
                       <div className="w-8 h-8 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center text-white font-bold text-sm">
                         {requester[0].toUpperCase()}
@@ -1031,13 +1006,13 @@
                     <div className="flex gap-1">
                       <button
                         onClick={() => acceptChatRequest(requester)}
-                        className="p-1 bg-green-500 text-white rounded hover:bg-green-600"
+                        className="p-1.5 bg-green-500 text-white rounded hover:bg-green-600 transition"
                       >
                         <CheckIcon />
                       </button>
                       <button
                         onClick={() => declineChatRequest(requester)}
-                        className="p-1 bg-red-500 text-white rounded hover:bg-red-600"
+                        className="p-1.5 bg-red-500 text-white rounded hover:bg-red-600 transition"
                       >
                         <XIcon />
                       </button>
@@ -1062,7 +1037,7 @@
                       loadMessagesForChat(chatUser);
                     }}
                     className={`w-full text-left px-4 py-4 hover:bg-gray-50 border-b border-gray-100 transition ${
-                      currentChat === chatUser ? 'bg-blue-50' : ''
+                      currentChat === chatUser ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''
                     }`}
                   >
                     <div className="flex items-center gap-3">
@@ -1089,7 +1064,7 @@
           <div className="flex-1 flex flex-col">
             {currentChat ? (
               <>
-                <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+                <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm z-10">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center text-white font-bold">
                       {currentChat[0].toUpperCase()}
@@ -1097,7 +1072,7 @@
                     <div>
                       <p className="font-semibold text-gray-900">{currentChat}</p>
                       <p className="text-sm text-gray-500">
-                        {typingUsers[currentChat] ? 'tippt...' : onlineUsers.includes(currentChat) ? 'Online' : 'Offline'}
+                        {typingUsers[currentChat] ? 'schreibt...' : onlineUsers.includes(currentChat) ? 'Online' : 'Offline'}
                       </p>
                     </div>
                   </div>
@@ -1121,12 +1096,12 @@
                         key={msg.id}
                         className={`flex mb-4 ${msg.user === currentUser ? 'justify-end' : 'justify-start'}`}
                       >
-                        <div className="relative">
+                        <div className="relative group">
                           <div 
                             className={`max-w-xs lg:max-w-md px-4 py-2 rounded-2xl cursor-pointer ${
                               msg.user === currentUser
-                                ? 'bg-blue-500 text-white rounded-br-none'
-                                : 'bg-white text-gray-800 rounded-bl-none shadow'
+                                ? 'bg-blue-500 text-white rounded-br-none shadow-md'
+                                : 'bg-white text-gray-800 rounded-bl-none shadow-md'
                             }`}
                             onContextMenu={(e) => {
                               e.preventDefault();
@@ -1141,7 +1116,7 @@
                             ) : (
                               <p className="break-words whitespace-pre-wrap">{msg.text}</p>
                             )}
-                            <p className={`text-xs mt-1 ${msg.user === currentUser ? 'text-blue-100' : 'text-gray-500'}`}>
+                            <p className={`text-xs mt-1 text-right ${msg.user === currentUser ? 'text-blue-100' : 'text-gray-400'}`}>
                               {new Date(msg.timestamp).toLocaleTimeString('de-DE', {
                                 hour: '2-digit',
                                 minute: '2-digit'
@@ -1149,14 +1124,14 @@
                             </p>
                             
                             {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-                              <div className="flex gap-1 mt-2 flex-wrap">
+                              <div className="flex gap-1 mt-2 flex-wrap justify-end">
                                 {Object.entries(msg.reactions).map(([emoji, users]) => (
                                   users.length > 0 && (
                                     <span 
                                       key={emoji}
-                                      className="bg-white bg-opacity-20 rounded-full px-2 py-0.5 text-sm flex items-center gap-1"
+                                      className="bg-white bg-opacity-20 rounded-full px-2 py-0.5 text-sm flex items-center gap-1 shadow-sm border border-gray-100"
                                     >
-                                      {emoji} {users.length}
+                                      {emoji} <span className="text-xs">{users.length}</span>
                                     </span>
                                   )
                                 ))}
@@ -1165,12 +1140,12 @@
                           </div>
 
                           {selectedMessage === msg.id && (
-                            <div className="absolute bottom-full mb-2 bg-white rounded-lg shadow-lg p-2 flex gap-2 z-10">
+                            <div className={`absolute bottom-full mb-2 bg-white rounded-lg shadow-xl p-2 flex gap-2 z-20 ${msg.user === currentUser ? 'right-0' : 'left-0'}`}>
                               {reactionEmojis.map(emoji => (
                                 <button
                                   key={emoji}
                                   onClick={() => addReaction(msg.id, emoji)}
-                                  className="text-2xl hover:scale-125 transition-transform"
+                                  className="text-2xl hover:scale-125 transition-transform p-1"
                                 >
                                   {emoji}
                                 </button>
@@ -1184,9 +1159,9 @@
                   <div ref={messagesEndRef} />
                 </div>
 
-                <div className="bg-white border-t border-gray-200 p-4">
+                <div className="bg-white border-t border-gray-200 p-4 shadow-lg">
                   {showEmojiPicker && (
-                    <div className="mb-3 p-3 bg-gray-50 rounded-2xl flex flex-wrap gap-2">
+                    <div className="mb-3 p-3 bg-gray-50 rounded-2xl flex flex-wrap gap-2 border border-gray-200">
                       {emojis.map((emoji, idx) => (
                         <button
                           key={idx}
@@ -1201,7 +1176,7 @@
                   <div className="flex items-end gap-2">
                     <button
                       onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                      className="p-2 text-gray-500 hover:text-gray-700 transition"
+                      className="p-3 text-gray-500 hover:text-gray-700 transition hover:bg-gray-100 rounded-full"
                     >
                       <SmileIcon />
                     </button>
@@ -1212,14 +1187,19 @@
                         handleTyping();
                       }}
                       onKeyPress={handleKeyPress}
-                      placeholder="Nachricht..."
+                      placeholder="Nachricht schreiben..."
                       rows="1"
-                      className="flex-1 px-4 py-2 border-2 border-gray-200 rounded-full focus:border-blue-500 focus:outline-none resize-none"
+                      className="flex-1 px-4 py-3 border border-gray-300 rounded-2xl focus:border-blue-500 focus:outline-none resize-none focus:ring-1 focus:ring-blue-500 bg-gray-50"
                       style={{ maxHeight: '100px' }}
                     />
                     <button
                       onClick={handleSendMessage}
-                      className="p-3 bg-blue-500 text-white rounded-full hover:bg-blue-600 transition shadow-lg"
+                      disabled={!message.trim()}
+                      className={`p-3 rounded-full transition shadow-md flex items-center justify-center ${
+                        message.trim() 
+                          ? 'bg-blue-500 text-white hover:bg-blue-600' 
+                          : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                      }`}
                     >
                       <SendIcon />
                     </button>
@@ -1234,8 +1214,8 @@
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                     </svg>
                   </div>
-                  <h3 className="text-xl font-semibold mb-2">Wähle einen Chat</h3>
-                  <p className="text-sm">Suche nach Benutzern oder wähle einen bestehenden Chat</p>
+                  <h3 className="text-xl font-semibold mb-2 text-gray-700">Willkommen beim Sicheren Chat</h3>
+                  <p className="text-sm max-w-xs mx-auto">Wähle einen Chat aus der Leiste oder suche nach neuen Kontakten.</p>
                 </div>
               </div>
             )}
