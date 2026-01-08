@@ -421,10 +421,39 @@
           const encryptedMessages = JSON.parse(result.value);
           
           const decryptedMessages = await Promise.all(
-            encryptedMessages.map(async msg => ({
-              ...msg,
-              text: await decryptMessage(msg.encryptedData, privateKey)
-            }))
+            encryptedMessages.map(async msg => {
+              let decryptedText = '';
+              
+              // Versuche mit encryptedData (für Empfänger)
+              if (msg.user !== currentUser && msg.encryptedData) {
+                try {
+                  decryptedText = await decryptMessage(msg.encryptedData, privateKey);
+                } catch (e) {
+                  decryptedText = '[Entschlüsselung fehlgeschlagen]';
+                }
+              }
+              // Versuche mit encryptedForSender (für Sender)
+              else if (msg.user === currentUser && msg.encryptedForSender) {
+                try {
+                  decryptedText = await decryptMessage(msg.encryptedForSender, privateKey);
+                } catch (e) {
+                  decryptedText = '[Entschlüsselung fehlgeschlagen]';
+                }
+              }
+              // Fallback: Versuche encryptedData
+              else if (msg.encryptedData) {
+                try {
+                  decryptedText = await decryptMessage(msg.encryptedData, privateKey);
+                } catch (e) {
+                  decryptedText = '[Entschlüsselung fehlgeschlagen]';
+                }
+              }
+              
+              return {
+                ...msg,
+                text: decryptedText
+              };
+            })
           );
           
           setMessages(prev => ({ ...prev, [chatUser]: decryptedMessages }));
@@ -577,12 +606,15 @@
 
       const acceptChatRequest = async (requester) => {
         try {
-          // Füge Requester zu meinen Chats hinzu
-          const newChats = [...chats, requester];
-          setChats(newChats);
-          await window.storage.set('chats_' + currentUser, JSON.stringify(newChats), true);
+          // Füge Requester zu meinen Chats hinzu (wenn noch nicht vorhanden)
+          let newChats = [...chats];
+          if (!newChats.includes(requester)) {
+            newChats.push(requester);
+            setChats(newChats);
+            await window.storage.set('chats_' + currentUser, JSON.stringify(newChats), true);
+          }
 
-          // Füge mich zu deren Chats hinzu
+          // Füge mich zu deren Chats hinzu (wenn noch nicht vorhanden)
           let theirChats = [];
           try {
             const result = await window.storage.get('chats_' + requester, true);
@@ -596,7 +628,7 @@
             await window.storage.set('chats_' + requester, JSON.stringify(theirChats), true);
           }
 
-          // Entferne aus Anfragen
+          // Entferne aus meinen Anfragen
           const newRequests = chatRequests.filter(r => r !== requester);
           setChatRequests(newRequests);
           await window.storage.set('requests_' + currentUser, JSON.stringify(newRequests), true);
@@ -641,17 +673,22 @@
         if (!message.trim() || !currentChat || !privateKey) return;
 
         try {
-          // Public Key des Empfängers laden
+          // Hole mein eigenes Public Key und Public Key des Empfängers
+          const myData = await window.storage.get('userdata_' + currentUser, true);
+          const myPublicKey = await importPublicKey(JSON.parse(myData.value).publicKey);
+          
           const recipientData = await window.storage.get('userdata_' + currentChat, true);
           const recipientPublicKey = await importPublicKey(JSON.parse(recipientData.value).publicKey);
 
-          // Nachricht verschlüsseln
-          const encrypted = await encryptMessage(message, recipientPublicKey);
+          // Verschlüssele Nachricht für BEIDE (Sender und Empfänger)
+          const encryptedForRecipient = await encryptMessage(message, recipientPublicKey);
+          const encryptedForMe = await encryptMessage(message, myPublicKey);
 
           const newMessage = {
             id: Date.now(),
             user: currentUser,
-            encryptedData: encrypted,
+            encryptedData: encryptedForRecipient,
+            encryptedForSender: encryptedForMe,
             reactions: {},
             timestamp: new Date().toISOString()
           };
@@ -677,6 +714,7 @@
           setMessage('');
           setShowEmojiPicker(false);
         } catch (e) {
+          console.error('Fehler beim Senden:', e);
           setError('Fehler beim Senden: ' + e.message);
         }
       };
@@ -1044,7 +1082,13 @@
                             }}
                             onClick={() => setSelectedMessage(msg.id === selectedMessage ? null : msg.id)}
                           >
-                            <p className="break-words whitespace-pre-wrap">{msg.text}</p>
+                            {msg.text === '[Entschlüsselung fehlgeschlagen]' ? (
+                              <p className="break-words whitespace-pre-wrap text-red-400 italic text-sm">
+                                🔒 Warte auf Freigabe...
+                              </p>
+                            ) : (
+                              <p className="break-words whitespace-pre-wrap">{msg.text}</p>
+                            )}
                             <p className={`text-xs mt-1 ${msg.user === currentUser ? 'text-blue-100' : 'text-gray-500'}`}>
                               {new Date(msg.timestamp).toLocaleTimeString('de-DE', {
                                 hour: '2-digit',
